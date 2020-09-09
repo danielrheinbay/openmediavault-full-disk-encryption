@@ -179,7 +179,7 @@ Check the partitions with `lsblk` and make the boot filesystem
 mkfs.ext4 /dev/sde1
 ```
 
-Now let's encrypt the root partition `sde3` and choosing a strong crypt key.
+Now let's encrypt the root partition `sde3`, choosing a strong crypt key.
 
 ```sh
 apt update && apt install cryptsetup
@@ -197,7 +197,7 @@ Lets open the drive and create a filesystem
 
 ```sh
 cryptsetup luksOpen /dev/sde3 root
-mke2fs -t ext4 /dev/mapper/root
+mkfs.ext4 /dev/mapper/root
 ```
 
 ### restore OMV
@@ -205,6 +205,7 @@ mke2fs -t ext4 /dev/mapper/root
 ```sh
 mkdir /newroot
 mount /dev/mapper/root /newroot
+mkdir /newroot/boot
 mount /dev/sde1 /newroot/boot
 rsync -a /oldroot/ /newroot/
 ```
@@ -250,18 +251,6 @@ update-grub
 grub-install /dev/sde
 ```
 
-> `pre-up` lead to not working network with me. Just as a reminder...
-
-To proper unload the dropbear network settings add the `pre-up` to the corresponding
-$IFACE
-
-```sh
-/etc/network/interfaces:
-iface enp2s0 inet static
-    pre-up ip adr flush dev $IFACE
-    ...
-```
-
 ### live system reboot
 
 umount every device after leaving the `chroot` and reboot
@@ -301,38 +290,8 @@ Next swap will be encrypted. Currently `free` should show 0 swap.
 
 ## encrypted swap
 
-find the unique partition and use it as swap (UUID is always different, so not
-usable)
+Follow https://wiki.archlinux.org/index.php/Dm-crypt/Swap_encryption#UUID_and_LABEL e.g. using the LABEL method.
 
-```sh
-find -L /dev/disk -samefile /dev/sde2
-```
-
-```sh
-/etc/crypttab:
-swap /dev/disk/by-id/ata-Samsung_SSD_840_PRO_Series_<...>-part2 /dev/urandom swap,cipher=aes-xts-plain64:sha256
-```
-
-```sh
-/etc/fstab:
-/dev/mapper/swap none swap sw 0 0
-```
-
-After a reboot `lsblk` output will be
-
-```sh
-NAME     MAJ:MIN RM   SIZE RO TYPE  MOUNTPOINT
-sda        8:0    0   3,7T  0 disk  
-sdb        8:16   0   3,7T  0 disk  
-sdc        8:32   0   3,7T  0 disk  
-sdd        8:48   0   3,7T  0 disk  
-sde        8:64   0 119,2G  0 disk  
-├─sde1     8:65   0     1G  0 part  /boot
-├─sde2     8:66   0    16G  0 part  
-│ └─swap 253:1    0    16G  0 crypt [SWAP]
-└─sde3     8:67   0 102,2G  0 part  
-  └─root 253:0    0 102,2G  0 crypt /
-```
 
 ## encrypt data drives and derive keys from root
 
@@ -348,10 +307,14 @@ Initial creation will be with an initial key, which is used to unlock in case
 of emergency.
 
 ```sh
-cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 luksFormat /dev/sda
-cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 luksFormat /dev/sdb
-cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 luksFormat /dev/sdc
-cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 luksFormat /dev/sdd
+cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 --label storage luksFormat /dev/md127
+cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 --label backup luksFormat /dev/sdg1
+```
+
+Lets open the drives for further setup:
+```sh
+cryptsetup luksOpen /dev/md127 storage
+cryptsetup luksOpen /dev/sdg1 backup
 ```
 
 ### create derived keys and crypttab
@@ -359,13 +322,11 @@ cryptsetup --cipher aes-xts-plain64 -s 512 -h sha256 --iter-time 5000 luksFormat
 Now lets add the key from the derived root mapper.
 
 ```sh
-cryptsetup luksAddKey /dev/sda <(/lib/cryptsetup/scripts/decrypt_derived root)
-cryptsetup luksAddKey /dev/sdb <(/lib/cryptsetup/scripts/decrypt_derived root)
-cryptsetup luksAddKey /dev/sdc <(/lib/cryptsetup/scripts/decrypt_derived root)
-cryptsetup luksAddKey /dev/sdd <(/lib/cryptsetup/scripts/decrypt_derived root)
+cryptsetup luksAddKey /dev/md127 <(/lib/cryptsetup/scripts/decrypt_derived root)
+cryptsetup luksAddKey /dev/sdg1 <(/lib/cryptsetup/scripts/decrypt_derived root)
 ```
 
-`cryptsetup luksDump /dev/sda` now shows 2 keys.
+`cryptsetup luksDump /dev/md127` now shows 2 keys.
 
 To create the data_key on the enrypted root device
 
@@ -376,53 +337,36 @@ To create the data_key on the enrypted root device
 mkdir -p /root/.luks
 chmod 700 /root/.luks
 /lib/cryptsetup/scripts/decrypt_derived root > /root/.luks/data_key
-chmid 400 /root/.luks/data_key
+chmod 400 /root/.luks/data_key
 ```
 
 Next append to `crypttab`, timeout is added to make it boot even in case of error.
 
 ```sh
 /etc/crypttab:
+# <target name>	<source device>		<key file>              <options>
+root	        UUID=...	        none                    luks
+swap	        LABEL=cryptswap     /dev/urandom            swap,offset=2048,cipher=aes-xts-plain64,size=512
 # data drives
-sda-crypt         UUID=xxxx          /root/.luks/data_key           luks,timeout=10s
-sdb-crypt         UUID=xxxx          /root/.luks/data_key           luks,timeout=10s
-sdc-crypt         UUID=xxxx          /root/.luks/data_key           luks,timeout=10s
-sdd-crypt         UUID=xxxx          /root/.luks/data_key           luks,timeout=10s
+storage         UUID=...            /root/.luks/data_key    luks,timeout=10s
+backup          UUID=...            /root/.luks/data_key    luks,timeout=10s
 ```
 
-Reboot and check if everything is mounted correctly
-
-```sh
-lsblk
-NAME        MAJ:MIN RM   SIZE RO TYPE  MOUNTPOINT
-sda           8:0    0   3,7T  0 disk  
-└─sda-crypt 253:2    0   3,7T  0 crypt
-sdb           8:16   0   3,7T  0 disk  
-└─sdb-crypt 253:4    0   3,7T  0 crypt
-sdc           8:32   0   3,7T  0 disk  
-└─sdc-crypt 253:5    0   3,7T  0 crypt
-sdd           8:48   0   3,7T  0 disk  
-└─sdd-crypt 253:3    0   3,7T  0 crypt
-sde           8:64   0 119,2G  0 disk  
-├─sde1        8:65   0     1G  0 part  /boot
-├─sde2        8:66   0    16G  0 part  
-│ └─swap    253:1    0    16G  0 crypt [SWAP]
-└─sde3        8:67   0 102,2G  0 part  
-  └─root    253:0    0 102,2G  0 crypt /
-```
+Reboot and check if everything is mounted correctly.
 
 From here you may start to use OMV as you like. If a drive is appended, use
 the commands from above and add it to `/etc/crypttab`.
 
-> OMV drive encryption plugin is usable as well to add the key and backup headers.
+> [OMV drive encryption plugin](https://bintray.com/openmediavault-plugin-developers/usul/openmediavault-luksencryption) is usable as well to add the key and backup headers.
 
 ## create filesystem
 
-Now whenever normaly refering to `/dev/sda` just use `/dev/mapper/sda-crypt` instead.
+Now whenever normaly refering to `/dev/sdX` just use `/dev/mapper/x` instead:
 
 ```sh
-screen -d -m mkfs.ext4 -b 4096 -m 0 -E lazy_itable_init=0,lazy_journal_init=0 -O 64bit /dev/mapper/sda-crypt -L parity1
-screen -d -m mkfs.ext4 -b 4096 -m 0 -E lazy_itable_init=0,lazy_journal_init=0 -O 64bit /dev/mapper/sdb-crypt -L data1
-screen -d -m mkfs.ext4 -b 4096 -m 0 -E lazy_itable_init=0,lazy_journal_init=0 -O 64bit /dev/mapper/sdc-crypt -L data2
-screen -d -m mkfs.ext4 -b 4096 -m 0 -E lazy_itable_init=0,lazy_journal_init=0 -O 64bit /dev/mapper/sdd-crypt -L data3
+mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0 /dev/mapper/storage -L storage
+mkfs.ext4 -E lazy_itable_init=0,lazy_journal_init=0 /dev/mapper/backup -L backup
 ```
+
+## mount filesystems
+Now, using OMV, mount filesystems which will create records in /etc/fstab for you.
