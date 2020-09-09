@@ -30,23 +30,15 @@ Follow the documentation: https://openmediavault.readthedocs.io/en/latest/instal
 
 ### dropbear setup
 
-Make sure following packages are present
+Make sure the following packages are present
 
 ```sh
 apt install cryptsetup
-apt install busybox dropbear
+apt install dropbear-initramfs
 ```
 
 > please refer to `/usr/share/doc/dropbear-initramfs/README.initramfs` and
 > `/usr/share/doc/cryptsetup/README.Debian.gz` Section 8
-
-extend `/etc/initramfs-tools/initramfs.conf`
-
-```sh
-DEVICE=enp2s0
-IP=$yourIP::$routerIP:255.255.255.0:$yourHostname:eth0:off
-DROPBEAR=y
-```
 
 I am on a local lan and with port forwarding I do not want to expose dropbear to the
 net. There I add `DROPBEAR_OPTIONS="-p 2222"` to `/etc/dropbear-initramfs/config`
